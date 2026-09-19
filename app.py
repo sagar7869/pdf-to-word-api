@@ -2,22 +2,26 @@ from flask import Flask, request, send_file
 from flask_cors import CORS
 import os
 import tempfile
-from adobe.pdfservices.operation.auth.credentials import Credentials
-from adobe.pdfservices.operation.execution_context import ExecutionContext
-from adobe.pdfservices.operation.io.file_ref import FileRef
-from adobe.pdfservices.operation.pdfops.export_pdf_operation import ExportPDFOperation
-from adobe.pdfservices.operation.pdfops.options.exportpdf.export_pdf_target_format import ExportPDFTargetFormat
+
+# Latest Adobe SDK v4 Imports
+from adobe.pdfservices.operation.auth.service_principal_credentials import ServicePrincipalCredentials
+from adobe.pdfservices.operation.pdf_services import PDFServices
+from adobe.pdfservices.operation.pdf_services_media_type import PDFServicesMediaType
+from adobe.pdfservices.operation.pdfjobs.jobs.export_pdf_job import ExportPDFJob
+from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_params import ExportPDFParams
+from adobe.pdfservices.operation.pdfjobs.params.export_pdf.export_pdf_target_format import ExportPDFTargetFormat
+from adobe.pdfservices.operation.pdfjobs.result.export_pdf_result import ExportPDFResult
 
 app = Flask(__name__)
 CORS(app)
 
-# Code ke andar key nahi daalenge, server se securely fetch karenge
+# Keys Render ke Environment variables se fetch hongi
 ADOBE_CLIENT_ID = os.environ.get("ADOBE_CLIENT_ID")
 ADOBE_CLIENT_SECRET = os.environ.get("ADOBE_CLIENT_SECRET")
 
 @app.route('/')
 def home():
-    return "Adobe PDF to Word API is running successfully!"
+    return "Adobe PDF to Word API (v4) is running successfully!"
 
 @app.route('/convert/pdf-to-word', methods=['POST'])
 def convert_pdf_to_word():
@@ -37,24 +41,36 @@ def convert_pdf_to_word():
     temp_docx.close()
 
     try:
+        # File server par save karein
         file.save(temp_pdf.name)
 
-        credentials = Credentials.service_principal_credentials_builder() \
-            .with_client_id(ADOBE_CLIENT_ID) \
-            .with_client_secret(ADOBE_CLIENT_SECRET) \
-            .build()
-        
-        execution_context = ExecutionContext.create(credentials)
-        export_pdf_operation = ExportPDFOperation.create_new(ExportPDFTargetFormat.DOCX)
-        
-        source_file_ref = FileRef.create_from_local_file(temp_pdf.name)
-        export_pdf_operation.set_input(source_file_ref)
-        
-        result = export_pdf_operation.execute(execution_context)
-        
-        if os.path.exists(temp_docx.name):
-            os.unlink(temp_docx.name)
-        result.save_as(temp_docx.name)
+        # 1. Credentials setup
+        credentials = ServicePrincipalCredentials(
+            client_id=ADOBE_CLIENT_ID,
+            client_secret=ADOBE_CLIENT_SECRET
+        )
+        pdf_services = PDFServices(credentials=credentials)
+
+        # 2. PDF upload karein
+        with open(temp_pdf.name, 'rb') as f:
+            input_stream = f.read()
+            
+        input_asset = pdf_services.upload(input_stream=input_stream, mime_type=PDFServicesMediaType.PDF)
+
+        # 3. Export to DOCX ka naya Job create karein
+        export_pdf_params = ExportPDFParams(target_format=ExportPDFTargetFormat.DOCX)
+        export_pdf_job = ExportPDFJob(input_asset=input_asset, export_pdf_params=export_pdf_params)
+
+        # 4. Job submit karein aur process hone ka wait karein
+        location = pdf_services.submit(export_pdf_job)
+        pdf_services_response = pdf_services.get_job_result(location, ExportPDFResult)
+
+        # 5. Output fetch karein aur local temporary file mein save karein
+        result_asset = pdf_services_response.get_result().get_asset()
+        stream_asset = pdf_services.get_content(result_asset)
+
+        with open(temp_docx.name, "wb") as f:
+            f.write(stream_asset.get_input_stream())
 
         return send_file(
             temp_docx.name,
@@ -65,6 +81,7 @@ def convert_pdf_to_word():
     except Exception as e:
         return {"message": f"Adobe API Error: {str(e)}"}, 500
     finally:
+        # Server memory clean up
         if os.path.exists(temp_pdf.name):
             os.unlink(temp_pdf.name)
         if os.path.exists(temp_docx.name):
